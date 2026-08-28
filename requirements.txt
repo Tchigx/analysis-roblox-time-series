@@ -1,0 +1,6 @@
+# Install locally, then run `pip freeze > requirements.lock.txt` and commit
+# that too. These ranges keep you on a known-good major version; the lock file
+# is what makes a CI run reproducible six months from now.
+requests~=2.32
+supabase~=2.15
+urllib3~=2.2
