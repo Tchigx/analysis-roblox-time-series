@@ -1,12 +1,4 @@
-"""Sample public Roblox experience metrics and write them to Supabase.
 
-Two stages:
-  1. Discovery -- walk the Discover-page sorts to collect universe IDs.
-  2. Detail    -- batch-fetch metrics for those IDs and store a snapshot.
-
-The old games.roblox.com/v1/games/list + /v1/games/sorts endpoints are
-deprecated; discovery now goes through apis.roblox.com/explore-api/v1.
-"""
 
 from __future__ import annotations
 
@@ -21,9 +13,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-# --------------------------------------------------------------------------
-# Config
-# --------------------------------------------------------------------------
+
 
 EXPLORE_BASE = "https://apis.roblox.com/explore-api/v1"
 GAMES_BASE = "https://games.roblox.com/v1"
