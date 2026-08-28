@@ -1,0 +1,31 @@
+name: Keepalive
+
+# GitHub disables scheduled workflows after 60 days with no repository
+# activity. If that happens the collector stops silently and the gap only
+# shows up when you next look at the data. This pushes a trivial commit every
+# week so the 60-day clock never runs out.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Touch heartbeat
+        run: date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
+
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .keepalive
+          git diff --staged --quiet || git commit -m "chore: keepalive"
+          git push
