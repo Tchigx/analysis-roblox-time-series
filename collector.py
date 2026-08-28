@@ -1,4 +1,12 @@
+"""Sample public Roblox experience metrics and write them to Supabase.
 
+Two stages:
+  1. Discovery -- walk the Discover-page sorts to collect universe IDs.
+  2. Detail    -- batch-fetch metrics for those IDs and store a snapshot.
+
+The old games.roblox.com/v1/games/list + /v1/games/sorts endpoints are
+deprecated; discovery now goes through apis.roblox.com/explore-api/v1.
+"""
 
 from __future__ import annotations
 
@@ -13,13 +21,17 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from supabase import create_client
 
-
+# --------------------------------------------------------------------------
+# Config
+# --------------------------------------------------------------------------
 
 EXPLORE_BASE = "https://apis.roblox.com/explore-api/v1"
 GAMES_BASE = "https://games.roblox.com/v1"
 
-# The detail endpoint caps at 100 universeIds per request.
-DETAIL_CHUNK_SIZE = 100
+# Conservative starting batch size. 100 returns 400 in practice; the real cap
+# is lower and undocumented. Failed batches are bisected (see fetch_batch), so
+# this is a starting guess rather than a hard requirement.
+DETAIL_CHUNK_SIZE = 50
 
 # Each sort returns roughly 100 experiences, so the number of sorts you walk
 # sets your ceiling. Walking all of them and de-duplicating typically lands
@@ -145,23 +157,62 @@ def chunked(items: list, size: int):
         yield items[i:i + size]
 
 
+class BadBatch(Exception):
+    """The server rejected this specific set of IDs (HTTP 400)."""
+
+
+def request_batch(session: requests.Session, ids: list[int]) -> list[dict]:
+    """One detail request.
+
+    The URL is built by hand rather than via params= because requests
+    percent-encodes the separators into %2C, and some Roblox endpoints reject
+    encoded commas.
+    """
+    url = f"{GAMES_BASE}/games?universeIds=" + ",".join(map(str, ids))
+    resp = session.get(url, timeout=REQUEST_TIMEOUT)
+
+    if resp.status_code == 400:
+        # Roblox puts a real explanation in the body -- surface it.
+        raise BadBatch(resp.text[:300])
+
+    resp.raise_for_status()
+    return resp.json().get("data", [])
+
+
+def fetch_batch(session: requests.Session, ids: list[int], depth: int = 0) -> list[dict]:
+    """Fetch a batch, halving it on rejection until the cause is isolated.
+
+    A 400 has two causes that look identical from outside: the batch is over
+    the server's size limit, or it contains a universe ID the API won't serve
+    (deleted, private, malformed). Bisection resolves both -- an oversized
+    batch keeps halving until it fits, and a poisonous ID keeps halving until
+    it's alone and gets dropped. Without this, one dead ID costs you every
+    other game in its batch.
+    """
+    try:
+        return request_batch(session, ids)
+    except BadBatch as exc:
+        if len(ids) == 1:
+            log.warning("dropping universe id %s: %s", ids[0], exc)
+            return []
+        if depth == 0:
+            log.info("batch of %d rejected, bisecting", len(ids))
+        mid = len(ids) // 2
+        return (fetch_batch(session, ids[:mid], depth + 1)
+                + fetch_batch(session, ids[mid:], depth + 1))
+    except Exception as exc:
+        log.warning("batch starting %s failed: %s", ids[0], exc)
+        return []
+
+
 def fetch_details(session: requests.Session, universe_ids: set[int]) -> list[dict]:
-    """Batch-fetch full game records, 100 IDs at a time."""
+    """Batch-fetch full game records."""
     records: list[dict] = []
 
     for chunk in chunked(sorted(universe_ids), DETAIL_CHUNK_SIZE):
-        try:
-            resp = session.get(
-                f"{GAMES_BASE}/games",
-                params={"universeIds": ",".join(map(str, chunk))},
-                timeout=REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
-            records.extend(resp.json().get("data", []))
-        except Exception as exc:
-            log.warning("detail chunk starting %s failed: %s", chunk[0], exc)
+        records.extend(fetch_batch(session, chunk))
 
-    log.info("fetched details for %d games", len(records))
+    log.info("fetched details for %d of %d games", len(records), len(universe_ids))
     return records
 
 
