@@ -1,23 +1,32 @@
 name: Roblox Data Collector
 
+# GitHub's scheduler does not honour sub-hourly crons. Measured behaviour on
+# public repos is roughly one run per 100 minutes for a */5 request, and the
+# docs warn that queued runs are dropped entirely under high load -- with the
+# top of the hour being the worst window.
+#
+# So: ask for one trigger an hour at an offset minute, and have each run
+# sample internally every 15 minutes for three hours. Runs deliberately
+# overlap. Duplicate samples landing in the same grid slot are averaged during
+# resampling in the analysis notebooks, so overlap is harmless, while missed
+# triggers no longer leave holes.
+
 on:
   schedule:
-    # Every 15 minutes. GitHub does not honour this precisely -- runs are
-    # commonly delayed 10-30 minutes and are dropped entirely under platform
-    # load, especially on the hour. The collector timestamps each sample, so
-    # treat the series as irregularly spaced in your analysis.
-    - cron: '*/15 * * * *'
+    - cron: '7 * * * *'
   workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'How long this run should keep sampling'
+        required: false
+        default: '180'
 
-# If a run overruns its slot, let the next one start rather than queueing up.
-concurrency:
-  group: collector
-  cancel-in-progress: false
+# No concurrency group: overlapping runs are the point.
 
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 200          # job ceiling is 6h; 3h of sampling fits
 
     steps:
       - uses: actions/checkout@v5
@@ -30,8 +39,30 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run collector
+      - name: Sample every 15 minutes
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python collector.py
+          DURATION_MINUTES: ${{ inputs.duration_minutes || '180' }}
+          INTERVAL_SECONDS: '900'
+        run: |
+          set -u
+          deadline=$(( $(date +%s) + DURATION_MINUTES * 60 ))
+          n=0
+
+          while :; do
+            n=$(( n + 1 ))
+            echo "::group::sample $n at $(date -u +%H:%M:%SZ)"
+            # A failed sample must not end the run -- the next one is 15
+            # minutes away and the failure is already logged to
+            # collection_runs in the database.
+            python collector.py || echo "sample $n failed, continuing"
+            echo "::endgroup::"
+
+            next=$(( $(date +%s) + INTERVAL_SECONDS ))
+            if [ "$next" -ge "$deadline" ]; then
+              echo "collected $n samples, stopping before the deadline"
+              break
+            fi
+            sleep "$INTERVAL_SECONDS"
+          done
